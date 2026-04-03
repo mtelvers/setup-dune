@@ -64,6 +64,7 @@ install-dune() {
 enable-pkg() {
   case "$(dune --version)" in
     3.19*|3.20*)
+      mkdir -p "$SETUPDUNEDIR/_build"
       (set -x; cd "$SETUPDUNEDIR" && test -d dune.lock) || dune_aux pkg lock
       ;;
     *)
