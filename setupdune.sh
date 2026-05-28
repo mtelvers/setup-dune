@@ -82,12 +82,14 @@ enable-pkg() {
     *)
       CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/dune"
       if test -e "$CONFIG_DIR/config"; then
-        dune_trace pkg enabled \
-          || abort "dune package management is disabled in your configuration"
+        dune_ pkg enabled || abort \
+          "dune package management is disabled in your global configuration"
       else
         mkdir -p "$CONFIG_DIR"
         printf '(lang dune 3.21)\n(pkg enabled)\n' > "$CONFIG_DIR/config"
         (set -x; cat "$CONFIG_DIR/config")
+        dune_ pkg enabled || abort \
+          "dune package management is disabled in your workspace configuration"
       fi
       ;;
   esac
