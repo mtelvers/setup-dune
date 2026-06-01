@@ -11,15 +11,27 @@ abort() {
   exit 2
 }
 
-dune_aux() {
+# A simple wrapper to run Dune in the correct directory with the workspace
+# setting
+dune_() {
+  x=:
+  case "$1" in
+    "-x")
+      shift
+      x="set -x"
+      ;;
+  esac
+  ($x; cd "$SETUPDUNEDIR" >/dev/null && \
+    dune "$@" ${SETUPDUNEWORKSPACE:+--workspace="$SETUPDUNEWORKSPACE"})
+}
+
+# Run Dune recording trace (and displaying it if requested)
+dune_trace() {
   status=0
   trace_file="_build/trace-$*.$SETUPDUNE_TRACEEXT"
   trace_file="${trace_file// /_}"
-  (set -x; cd "$SETUPDUNEDIR" && \
-    dune "$@" \
-      --trace-file="$trace_file" \
-      ${SETUPDUNEWORKSPACE:+--workspace="$SETUPDUNEWORKSPACE"} \
-      ${SETUPDUNEDISPLAY:+--display="$SETUPDUNEDISPLAY"}) \
+  dune_ -x "$@" --trace-file="$trace_file" \
+      ${SETUPDUNEDISPLAY:+--display="$SETUPDUNEDISPLAY"} \
     || status=$?
   if ! test "$status" = 0; then
     echo "::endgroup::"
@@ -65,12 +77,12 @@ enable-pkg() {
   case "$(dune --version)" in
     3.19*|3.20*)
       mkdir -p "$SETUPDUNEDIR/_build"
-      (set -x; cd "$SETUPDUNEDIR" && test -d dune.lock) || dune_aux pkg lock
+      (set -x; cd "$SETUPDUNEDIR" && test -d dune.lock) || dune_trace pkg lock
       ;;
     *)
       CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/dune"
       if test -e "$CONFIG_DIR/config"; then
-        dune_aux pkg enabled \
+        dune_trace pkg enabled \
           || abort "dune package management is disabled in your configuration"
       else
         mkdir -p "$CONFIG_DIR"
@@ -107,9 +119,7 @@ install-gpatch() {
 }
 
 install-depexts() {
-  DEPEXTS="$(cd "$SETUPDUNEDIR" >/dev/null && \
-             dune show depexts \
-               ${SETUPDUNEWORKSPACE:+--workspace="$SETUPDUNEWORKSPACE"} 2>&1)" \
+  DEPEXTS="$(dune_ show depexts 2>&1)" \
     || abort "got \"$DEPEXTS\" when listing depexts"
   case "$OS,$DEPEXTS" in
     *,) # No depexts to install
@@ -128,15 +138,15 @@ install-depexts() {
 }
 
 build-deps() {
-  dune_aux build @pkg-install
+  dune_trace build @pkg-install
 }
 
 build() {
-  dune_aux build
+  dune_trace build
 }
 
 runtest() {
-  dune_aux runtest
+  dune_trace runtest
 }
 
 expand_steps() {
