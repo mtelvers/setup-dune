@@ -32,7 +32,7 @@ dune_aux() {
       (set -x; cd "$SETUPDUNEDIR" && \
         dune trace commands --trace-file="$trace_file")
     fi
-    exit "$status"
+    return "$status"
   fi
 }
 
@@ -157,14 +157,16 @@ expand_steps() {
 }
 
 w() {
+  status=0
   # Wrap a step to control whether it should run
   case "$STEPS" in
     *"$2"*)
       echo "::group::$1"
-      "$2"
+      "$2" || status=$?
       echo "::endgroup::"
       ;;
   esac
+  test "$status" = 0 || exit "$status"
 }
 
 main() {
