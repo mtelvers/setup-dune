@@ -1,0 +1,147 @@
+# Network reproduction harness for the get.dune.build connectivity failures.
+#
+# Background: a small fraction (~10-20%) of GitHub-hosted runners cannot open a
+# TCP connection to get.dune.build (128.232.124.216:443). The SYNs never reach
+# Cambridge — the failure is tied to the runner's Azure *egress* IP, not the
+# server. This workflow fans out many independent runners, each probing
+# get.dune.build with a SHORT connect timeout (so a wedged runner fails in
+# seconds instead of the ~22 min the 10x/135s retry loop took), records the
+# runner's public egress IP, and aggregates which egress IPs failed.
+#
+# Run it from the Actions tab ("Run workflow") or:
+#   gh workflow run stress-network.yml -R mtelvers/setup-dune \
+#     -f count=60 -f connect_timeout=10 -f attempts=3
+
+name: Network stress (get.dune.build)
+
+on:
+  workflow_dispatch:
+    inputs:
+      count:
+        description: "Number of parallel probe runners"
+        default: "60"
+      connect_timeout:
+        description: "curl --connect-timeout (seconds) per attempt"
+        default: "10"
+      attempts:
+        description: "Connection attempts per runner"
+        default: "3"
+      host:
+        description: "Target URL to probe"
+        default: "https://get.dune.build/install"
+
+permissions:
+  contents: read
+
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - id: gen
+        run: |
+          n="${{ inputs.count }}"
+          echo "matrix=$(seq 1 "$n" | jq -R . | jq -cs .)" >> "$GITHUB_OUTPUT"
+
+  probe:
+    needs: prep
+    name: probe ${{ matrix.i }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 256
+      matrix:
+        i: ${{ fromJson(needs.prep.outputs.matrix) }}
+    env:
+      CT: ${{ inputs.connect_timeout }}
+      ATTEMPTS: ${{ inputs.attempts }}
+      URL: ${{ inputs.host }}
+    steps:
+      - name: Probe ${{ inputs.host }}
+        run: |
+          set -u
+          mkdir -p out
+
+          # Public egress IPv4 of this runner (the value to correlate failures against)
+          EGRESS=$(curl -4 -s --max-time 10 https://api.ipify.org || true)
+          [ -z "$EGRESS" ] && EGRESS=$(curl -4 -s --max-time 10 https://ifconfig.me || true)
+          [ -z "$EGRESS" ] && EGRESS=unknown
+          echo "Runner egress IPv4: $EGRESS"
+          echo "DNS for get.dune.build:"; getent ahosts get.dune.build || true
+
+          ok=0; fail=0
+          for a in $(seq 1 "$ATTEMPTS"); do
+            if line=$(curl -4 -fsS --connect-timeout "$CT" --max-time 60 -o /dev/null \
+                 -w "connect=%{time_connect}s appconnect=%{time_appconnect}s total=%{time_total}s code=%{http_code}" \
+                 "$URL" 2>err.txt); then
+              echo "attempt $a: OK   $line"; ok=$((ok+1))
+            else
+              rc=$?; echo "attempt $a: FAIL rc=$rc $(tr -d '\n' < err.txt)"; fail=$((fail+1))
+            fi
+          done
+
+          status=ok; [ "$ok" -eq 0 ] && status=FAIL
+          echo "RESULT i=${{ matrix.i }} egress=$EGRESS ok=$ok fail=$fail status=$status" \
+            | tee "out/result-${{ matrix.i }}.txt"
+
+          # On total failure, grab path diagnostics so we can see where it dies.
+          if [ "$ok" -eq 0 ]; then
+            echo "::group::diagnostics (all $ATTEMPTS attempts failed from egress $EGRESS)"
+            curl -4 -v --connect-timeout "$CT" "$URL" -o /dev/null || true
+            sudo apt-get -qq update >/dev/null 2>&1 || true
+            sudo apt-get -qq install -y traceroute mtr-tiny >/dev/null 2>&1 || true
+            command -v traceroute >/dev/null && sudo traceroute -T -p 443 -w 2 -q 1 -m 24 get.dune.build || true
+            command -v mtr >/dev/null && sudo mtr -T -P 443 -c 10 -r get.dune.build || true
+            echo "::endgroup::"
+          fi
+
+          {
+            echo "- probe ${{ matrix.i }}: egress \`$EGRESS\` — ok=$ok fail=$fail **$status**"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Make the job red if every attempt failed, so it stands out in the matrix.
+          [ "$ok" -gt 0 ]
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.i }}
+          path: out/result-${{ matrix.i }}.txt
+          retention-days: 3
+
+  report:
+    needs: probe
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: results
+          pattern: result-*
+          merge-multiple: true
+      - name: Aggregate
+        run: |
+          set -u
+          cat results/*.txt 2>/dev/null | sort -t= -k2 -n > all.txt || true
+          total=$(wc -l < all.txt | tr -d ' ')
+          fails=$(grep -c 'status=FAIL' all.txt || true)
+          {
+            echo "## get.dune.build network stress — summary"
+            echo ""
+            echo "**Total probes:** $total  **Fully failed:** $fails"
+            echo ""
+            echo "### Egress IPs that could NOT connect"
+            if [ "$fails" -gt 0 ]; then
+              grep 'status=FAIL' all.txt | sed -E 's/.*egress=([^ ]+).*/- \1/' | sort -u
+            else
+              echo "_none — all probes connected_"
+            fi
+            echo ""
+            echo "### Raw results"
+            echo '```'
+            cat all.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "Total=$total Failed=$fails"
