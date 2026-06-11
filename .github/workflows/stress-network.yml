@@ -69,35 +69,49 @@ jobs:
           [ -z "$EGRESS" ] && EGRESS=unknown
           echo "Runner egress IPv4: $EGRESS"
 
+          # Does this runner even have IPv6 egress?
+          EGRESS6=$(curl -6 -s --max-time 8 https://api6.ipify.org 2>/dev/null || true)
+          [ -z "$EGRESS6" ] && EGRESS6=none
+          echo "Runner egress IPv6: $EGRESS6"
+
           # TCP-connect probe; classifies reachability of a target independent of TLS/HTTP.
-          #   rc=28        -> BLOCKED (connect timed out = SYN black-holed)
-          #   rc=7         -> reached (connection refused / RST)
-          #   tc>0 (rc 0/35/22/52/56...) -> reached (TCP handshake completed)
+          #   rc=28              -> BLOCKED   (connect timed out = SYN black-holed mid-path)
+          #   tc>0               -> reached   (TCP handshake completed)
+          #   rc=7 (v4, fast)    -> reached   (connection refused / RST = host answered)
+          #   rc=6/7 (v6, no tc) -> NOV6      (no IPv6 route from this runner)
           probe() {
-            local label=$1 url=$2 tc rc cls
-            tc=$(curl -4 -sS -o /dev/null --connect-timeout "$CT" --max-time 25 -w '%{time_connect}' "$url" 2>/dev/null); rc=$?
+            local fam=$1 label=$2 url=$3 tc rc cls
+            tc=$(curl -"$fam" -sS -o /dev/null --connect-timeout "$CT" --max-time 25 -w '%{time_connect}' "$url" 2>/dev/null); rc=$?
             if [ "$rc" = 28 ]; then cls=BLOCKED
-            elif [ -n "$tc" ] && [ "$tc" != "0.000000" ] || [ "$rc" = 7 ]; then cls=reached
+            elif [ -n "$tc" ] && [ "$tc" != "0.000000" ]; then cls=reached
+            elif [ "$fam" = 6 ] && { [ "$rc" = 6 ] || [ "$rc" = 7 ]; }; then cls=NOV6
+            elif [ "$rc" = 7 ]; then cls=reached
             else cls="rc$rc"; fi
             echo "${label}:${cls}(rc${rc},tc${tc:-0})"
           }
 
-          # dune + an independent Cambridge host (mint, same border) + two non-Cambridge controls
-          DUNE=$(probe dune  "$URL")
-          CAM=$(probe  cam   "https://128.232.124.158/")
-          GH=$(probe   github "https://github.com")
-          CF=$(probe   cf     "https://1.1.1.1")
-          echo "$DUNE $CAM $GH $CF"
+          # IPv4: dune + an independent Cambridge host (mint, same border) + non-Cambridge controls
+          DUNE=$(probe 4 dune   "$URL")
+          CAM=$(probe  4 cam    "https://128.232.124.158/")
+          GH=$(probe   4 github "https://github.com")
+          CF=$(probe   4 cf     "https://1.1.1.1")
+          EU=$(probe   4 eu     "https://european-union.europa.eu")
+          # IPv6: dune over v6 + non-Cambridge v6 controls (Cloudflare, EU) to tell "no v6" from "Cambridge-blocked"
+          DUNE6=$(probe 6 dune6 "$URL")
+          CF6=$(probe   6 cf6   "https://[2606:4700:4700::1111]")
+          EU6=$(probe   6 eu6   "https://european-union.europa.eu")
+          echo "v4: $DUNE $CAM $GH $CF $EU"
+          echo "v6: $DUNE6 $CF6 $EU6"
 
           status=ok; case "$DUNE" in dune:reached*) ;; *) status=FAIL;; esac
-          echo "RESULT i=${{ matrix.i }} egress=$EGRESS status=$status $DUNE $CAM $GH $CF" \
+          echo "RESULT i=${{ matrix.i }} egress=$EGRESS egress6=$EGRESS6 status=$status $DUNE $CAM $GH $CF $EU $DUNE6 $CF6 $EU6" \
             | tee "out/result-${{ matrix.i }}.txt"
 
           {
-            echo "- probe ${{ matrix.i }}: \`$EGRESS\` — $DUNE $CAM $GH $CF **$status**"
+            echo "- probe ${{ matrix.i }}: v4 \`$EGRESS\` / v6 \`$EGRESS6\` — $DUNE $CAM $GH $CF $EU $DUNE6 $CF6 $EU6 **$status**"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          # Red if dune was blocked, so failures stand out in the matrix.
+          # Red if dune was blocked over IPv4, so failures stand out in the matrix.
           case "$DUNE" in dune:reached*) true;; *) false;; esac
 
       - name: Upload result
