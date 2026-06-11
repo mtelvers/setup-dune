@@ -93,6 +93,7 @@ jobs:
           # IPv4: dune + an independent Cambridge host (mint, same border) + non-Cambridge controls
           DUNE=$(probe 4 dune   "$URL")
           CAM=$(probe  4 cam    "https://128.232.124.158/")
+          DL2=$(probe  4 dl2    "https://dl2.geotessera.org/")
           GH=$(probe   4 github "https://github.com")
           CF=$(probe   4 cf     "https://1.1.1.1")
           EU=$(probe   4 eu     "https://european-union.europa.eu")
@@ -100,11 +101,11 @@ jobs:
           DUNE6=$(probe 6 dune6 "$URL")
           CF6=$(probe   6 cf6   "https://[2606:4700:4700::1111]")
           EU6=$(probe   6 eu6   "https://european-union.europa.eu")
-          echo "v4: $DUNE $CAM $GH $CF $EU"
+          echo "v4: $DUNE $CAM $DL2 $GH $CF $EU"
           echo "v6: $DUNE6 $CF6 $EU6"
 
           status=ok; case "$DUNE" in dune:reached*) ;; *) status=FAIL;; esac
-          echo "RESULT i=${{ matrix.i }} egress=$EGRESS egress6=$EGRESS6 status=$status $DUNE $CAM $GH $CF $EU $DUNE6 $CF6 $EU6" \
+          echo "RESULT i=${{ matrix.i }} egress=$EGRESS egress6=$EGRESS6 status=$status $DUNE $CAM $DL2 $GH $CF $EU $DUNE6 $CF6 $EU6" \
             | tee "out/result-${{ matrix.i }}.txt"
 
           {
