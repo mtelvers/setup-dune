@@ -58,7 +58,7 @@ jobs:
       ATTEMPTS: ${{ inputs.attempts }}
       URL: ${{ inputs.host }}
     steps:
-      - name: Probe ${{ inputs.host }}
+      - name: Probe targets
         run: |
           set -u
           mkdir -p out
@@ -68,40 +68,37 @@ jobs:
           [ -z "$EGRESS" ] && EGRESS=$(curl -4 -s --max-time 10 https://ifconfig.me || true)
           [ -z "$EGRESS" ] && EGRESS=unknown
           echo "Runner egress IPv4: $EGRESS"
-          echo "DNS for get.dune.build:"; getent ahosts get.dune.build || true
 
-          ok=0; fail=0
-          for a in $(seq 1 "$ATTEMPTS"); do
-            if line=$(curl -4 -fsS --connect-timeout "$CT" --max-time 60 -o /dev/null \
-                 -w "connect=%{time_connect}s appconnect=%{time_appconnect}s total=%{time_total}s code=%{http_code}" \
-                 "$URL" 2>err.txt); then
-              echo "attempt $a: OK   $line"; ok=$((ok+1))
-            else
-              rc=$?; echo "attempt $a: FAIL rc=$rc $(tr -d '\n' < err.txt)"; fail=$((fail+1))
-            fi
-          done
+          # TCP-connect probe; classifies reachability of a target independent of TLS/HTTP.
+          #   rc=28        -> BLOCKED (connect timed out = SYN black-holed)
+          #   rc=7         -> reached (connection refused / RST)
+          #   tc>0 (rc 0/35/22/52/56...) -> reached (TCP handshake completed)
+          probe() {
+            local label=$1 url=$2 tc rc cls
+            tc=$(curl -4 -sS -o /dev/null --connect-timeout "$CT" --max-time 25 -w '%{time_connect}' "$url" 2>/dev/null); rc=$?
+            if [ "$rc" = 28 ]; then cls=BLOCKED
+            elif [ -n "$tc" ] && [ "$tc" != "0.000000" ] || [ "$rc" = 7 ]; then cls=reached
+            else cls="rc$rc"; fi
+            echo "${label}:${cls}(rc${rc},tc${tc:-0})"
+          }
 
-          status=ok; [ "$ok" -eq 0 ] && status=FAIL
-          echo "RESULT i=${{ matrix.i }} egress=$EGRESS ok=$ok fail=$fail status=$status" \
+          # dune + an independent Cambridge host (mint, same border) + two non-Cambridge controls
+          DUNE=$(probe dune  "$URL")
+          CAM=$(probe  cam   "https://128.232.124.158/")
+          GH=$(probe   github "https://github.com")
+          CF=$(probe   cf     "https://1.1.1.1")
+          echo "$DUNE $CAM $GH $CF"
+
+          status=ok; case "$DUNE" in dune:reached*) ;; *) status=FAIL;; esac
+          echo "RESULT i=${{ matrix.i }} egress=$EGRESS status=$status $DUNE $CAM $GH $CF" \
             | tee "out/result-${{ matrix.i }}.txt"
 
-          # On total failure, grab path diagnostics so we can see where it dies.
-          if [ "$ok" -eq 0 ]; then
-            echo "::group::diagnostics (all $ATTEMPTS attempts failed from egress $EGRESS)"
-            curl -4 -v --connect-timeout "$CT" "$URL" -o /dev/null || true
-            sudo apt-get -qq update >/dev/null 2>&1 || true
-            sudo apt-get -qq install -y traceroute mtr-tiny >/dev/null 2>&1 || true
-            command -v traceroute >/dev/null && sudo traceroute -T -p 443 -w 2 -q 1 -m 24 get.dune.build || true
-            command -v mtr >/dev/null && sudo mtr -T -P 443 -c 10 -r get.dune.build || true
-            echo "::endgroup::"
-          fi
-
           {
-            echo "- probe ${{ matrix.i }}: egress \`$EGRESS\` — ok=$ok fail=$fail **$status**"
+            echo "- probe ${{ matrix.i }}: \`$EGRESS\` — $DUNE $CAM $GH $CF **$status**"
           } >> "$GITHUB_STEP_SUMMARY"
 
-          # Make the job red if every attempt failed, so it stands out in the matrix.
-          [ "$ok" -gt 0 ]
+          # Red if dune was blocked, so failures stand out in the matrix.
+          case "$DUNE" in dune:reached*) true;; *) false;; esac
 
       - name: Upload result
         if: always()
